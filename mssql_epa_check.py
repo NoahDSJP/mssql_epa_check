@@ -16,6 +16,12 @@ RED = f"\033[91m{BOLD}"
 CYAN = f"\033[96m{BOLD}"
 RESET = "\033[0m"
 
+# SQL Server error numbers are carried in the TDS ERROR token and do not vary
+# with the server language.  Do not classify authentication results from the
+# localized MsgText field.
+SQL_ERROR_UNTRUSTED_DOMAIN = 18452
+SQL_ERROR_LOGIN_FAILED = 18456
+
 EPA_LABELS = {
     "off": f"{RED}[+] Extended Protection: Off - NTLM relay POSSIBLE (Vulnerable){RESET}",
     "allowed": f"{YELLOW}[+] Extended Protection: Allowed - NTLM relay may succeed with NTLMv1 clients (Partially Vulnerable){RESET}",
@@ -34,6 +40,16 @@ def debug(msg):
 
 
 class MSSQLEpaTest(tds.MSSQL):
+
+    def get_error_numbers(self):
+        if not hasattr(self, 'replies') or not self.replies:
+            return []
+        numbers = []
+        for keys in self.replies:
+            for key in self.replies[keys]:
+                if key['TokenType'] == tds.TDS_ERROR_TOKEN:
+                    numbers.append(int(key['Number']))
+        return numbers
 
     def get_error_messages(self):
         if not hasattr(self, 'replies') or not self.replies:
@@ -198,6 +214,16 @@ class MSSQLEpaTest(tds.MSSQL):
         return success
 
 
+def classify_login_failure(conn, protocol):
+    error_numbers = conn.get_error_numbers()
+    debug(f"[{protocol}] SQL Server error number(s): {error_numbers or '(none)'}")
+    if SQL_ERROR_UNTRUSTED_DOMAIN in error_numbers:
+        return "untrusted_domain"
+    if SQL_ERROR_LOGIN_FAILED in error_numbers:
+        return "login_failed"
+    return "other"
+
+
 def test_connection(host, port, username, password, domain, hashes,
                     channel_binding_value=None, service='MSSQLSvc', strip_target_service=False):
     debug(f"--- NTLM test_connection start: host={host}, cb={channel_binding_value!r}, service={service}, strip={strip_target_service} ---")
@@ -211,12 +237,7 @@ def test_connection(host, port, username, password, domain, hashes,
         )
         if res:
             return "success"
-        errors = conn.get_error_messages()
-        if "untrusted domain" in errors:
-            return "untrusted_domain"
-        if "Login failed" in errors:
-            return "login_failed"
-        return "other"
+        return classify_login_failure(conn, "NTLM")
     except Exception as e:
         debug(f"[NTLM] Exception: {e!r}")
         return f"error: {e}"
@@ -238,14 +259,7 @@ def test_connection_kerberos(host, port, username, password, domain, kdc_host=No
         )
         if res:
             return "success"
-        errors = conn.get_error_messages()
-        # NTLM uses "untrusted domain" — Kerberos may use a different string.
-        # Keep observation flexible until we have real samples.
-        if "untrusted domain" in errors:
-            return "untrusted_domain"
-        if "Login failed" in errors:
-            return "login_failed"
-        return "other"
+        return classify_login_failure(conn, "KRB")
     except Exception as e:
         debug(f"[KRB] Exception: {e!r}")
         return f"error: {e}"
